@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="panel">
+    <h1 class="page-title">卷烟条包收货与退货追溯</h1>
+    <p class="page-desc">演示系统 · 数据为虚构品牌与编号</p>
+    <label class="field">
+      <span>登录账号</span>
+      <input type="text" id="username" placeholder="zhang / wang / zhao / qian" autocomplete="username">
+    </label>
+    <button class="primary" id="login-btn" style="width:100%">登录</button>
+    <div class="login-accounts">
+      演示账号（无密码，点击可直接填入）：<br>
+      <a href="#" data-u="zhang" class="quick-login">zhang</a>＝S001 店员（收货扫描、发起退货）<br>
+      <a href="#" data-u="wang" class="quick-login">wang</a>＝S001 店长（复核、处置、回执、盘点）<br>
+      <a href="#" data-u="zhao" class="quick-login">zhao</a>＝S002 店员　<a href="#" data-u="qian" class="quick-login">qian</a>＝S002 店长
+    </div>
+  </div>
+</div>
+<script src="/app.js"></script>
+<script>
+document.querySelector("#login-btn").addEventListener("click", doLogin);
+document.querySelector("#username").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+document.querySelectorAll(".quick-login").forEach(a => a.addEventListener("click", e => {
+  e.preventDefault();
+  document.querySelector("#username").value = a.dataset.u;
+  doLogin();
+}));
+async function doLogin() {
+  const username = document.querySelector("#username").value.trim();
+  if (!username) return;
+  try {
+    await TRACE.api("POST", "/api/login", { username });
+    const next = new URLSearchParams(location.search).get("next") || "/receive.html";
+    location.href = next;
+  } catch (e) {
+    TRACE.toast("登录失败", e.message, "bad");
+  }
+}
+</script>
+</body>
+</html>

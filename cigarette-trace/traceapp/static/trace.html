@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>条包追溯 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <h1 class="page-title">条包追溯</h1>
+  <p class="page-desc">固定显示完整串码与最近一次流转位置；销售退回必须核对原始入库链路（配送单、批次、库位）。</p>
+
+  <div class="panel">
+    <div class="row-inline">
+      <label class="field" style="flex:2">
+        <span>条包串码</span>
+        <input type="text" id="serial" placeholder="输入完整串码后回车，如 HM260901001" autocomplete="off">
+      </label>
+      <button class="primary" id="trace-btn">追溯查询</button>
+    </div>
+    <div class="pill-row" style="margin-top:8px">
+      <span class="chip">HM260901001</span>
+      <span class="chip">XH260901005</span>
+      <span class="chip">HM260801001</span>
+      <span class="chip">QL2609010X</span>
+      <span class="chip">HM260901008</span>
+    </div>
+  </div>
+
+  <div id="detail" style="display:none">
+    <div class="serial-anchor">
+      <div class="sa-label">完整串码</div>
+      <div class="sa-serial" id="sa-serial"></div>
+      <div class="sa-loc">最近一次流转位置：<b id="sa-loc">—</b>
+        <span id="sa-badges" style="margin-left:10px"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>原始入库链路核对</h2>
+      <div id="chain"></div>
+    </div>
+
+    <div class="panel">
+      <h2>流转记录</h2>
+      <ul class="timeline" id="events"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>退货处理</h2>
+      <div id="return-area"></div>
+    </div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let ME = null;
+let CURRENT = null;
+
+TRACE.initPage("/trace.html", async (me) => {
+  ME = me;
+  $("#trace-btn").addEventListener("click", doTrace);
+  $("#serial").addEventListener("keydown", e => { if (e.key === "Enter") doTrace(); });
+  document.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => {
+    $("#serial").value = c.textContent;
+    doTrace();
+  }));
+  const jumpSerial = sessionStorage.getItem("trace-serial");
+  if (jumpSerial) {
+    sessionStorage.removeItem("trace-serial");
+    $("#serial").value = jumpSerial;
+    doTrace();
+  }
+});
+
+async function doTrace() {
+  const serial = $("#serial").value.trim();
+  if (!serial) return;
+  try {
+    CURRENT = await TRACE.api("GET", "/api/trace?serial=" + encodeURIComponent(serial));
+    render(CURRENT);
+  } catch (e) {
+    $("#detail").style.display = "none";
+    TRACE.toast("追溯失败", e.message, "bad");
+  }
+}
+
+function render(d) {
+  $("#detail").style.display = "";
+  const p = d.pack;
+  $("#sa-serial").textContent = p ? p.serial : $("#serial").value.trim();
+  if (!p) {
+    $("#sa-loc").textContent = "系统内无此条包主档";
+    $("#sa-badges").innerHTML = TRACE.badge("来源不明", "bad");
+  } else {
+    const last = d.events.length ? d.events[d.events.length - 1] : null;
+    $("#sa-loc").textContent = p.location + (last ? `（${TRACE.EVENT_TEXT[last.event_type] || last.event_type}）` : "");
+    $("#sa-badges").innerHTML = TRACE.statusBadge(p.status) + " " + TRACE.anomalyBadge(p.anomaly);
+  }
+  renderChain(d);
+  renderEvents(d);
+  renderReturn(d);
+}
+
+function kv(rows) {
+  return `<dl class="kv">` + rows.map(([k, v, cls]) =>
+    `<dt>${TRACE.esc(k)}</dt><dd class="${cls || ""}">${v}</dd>`).join("") + `</dl>`;
+}
+
+function renderChain(d) {
+  const host = $("#chain");
+  if (!d.inbound_chain) {
+    host.innerHTML = `<div class="verdict bad"><div class="v-title">核对结论：无原始入库链路</div>
+      <div class="v-body">该串码不存在于任何配送单，销售退回核对不通过，禁止退货。</div></div>`;
+    return;
+  }
+  const l = d.inbound_chain;
+  const p = d.pack;
+  // 实物（pack）与单据（line）对比：条码/批次可能不一致
+  const bcHit = p && p.barcode && p.barcode !== l.line_barcode;
+  const btHit = p && p.batch && p.batch !== l.batch;
+  const storeHit = p && p.store_id && p.store_id !== l.note_store_id;
+  const allOk = !bcHit && !btHit && !storeHit;
+  host.innerHTML = `
+    <div class="verdict ${allOk ? "ok" : "bad"}">
+      <div class="v-title">${allOk ? "核对结论：实物与入库链路一致" : "核对结论：链路核对存在差异，需以单据为准处置"}</div>
+      <div class="v-body">配送单 <span class="serial-mono">${TRACE.esc(l.note_id)}</span>，
+      配送方 ${TRACE.esc(l.carrier)}，签收 ${TRACE.esc(l.delivered_at)}，配送单门店 ${TRACE.esc(l.note_store_id)}</div>
+    </div>
+    <div class="compare">
+      <div>
+        <h4>配送单原始记录（入库链路）</h4>
+        ${kv([
+          ["品牌规格", TRACE.esc(l.brand_name) + " " + TRACE.esc(l.brand_spec)],
+          ["单据条码", `<span class="serial-mono">${TRACE.esc(l.line_barcode)}</span>`],
+          ["单据批次", TRACE.esc(l.batch)],
+          ["计划库位", TRACE.esc(l.location)],
+          ["所属门店", TRACE.esc(l.note_store_id)],
+        ])}
+      </div>
+      <div>
+        <h4>实物扫码 / 当前主档</h4>
+        ${p ? kv([
+          ["实物条码", `<span class="serial-mono">${TRACE.esc(p.barcode || "—")}</span>`, bcHit ? "diff-hit" : ""],
+          ["实物批次", TRACE.esc(p.batch || "—"), btHit ? "diff-hit" : ""],
+          ["当前库位", TRACE.esc(p.location || "—")],
+          ["主档门店", TRACE.esc(p.store_id || "—"), storeHit ? "diff-hit" : ""],
+        ]) : `<p class="muted">尚未扫码登记</p>`}
+      </div>
+    </div>`;
+}
+
+function renderEvents(d) {
+  const host = $("#events");
+  if (!d.events.length) { host.innerHTML = `<li class="muted">暂无流转记录。</li>`; return; }
+  host.innerHTML = d.events.map(e => `
+    <li>
+      <span class="t-time">${TRACE.esc(e.created_at)}</span>
+      <strong>${TRACE.esc(TRACE.EVENT_TEXT[e.event_type] || e.event_type)}</strong>
+      ${e.from_status || e.to_status ? ` <span class="small muted">[${TRACE.esc(TRACE.STATUS_TEXT[e.from_status] || e.from_status || "—")} → ${TRACE.esc(TRACE.STATUS_TEXT[e.to_status] || e.to_status || "—")}]</span>` : ""}
+      <div class="t-detail">${TRACE.esc(e.detail || "")}</div>
+      <div class="t-actor">操作人：${TRACE.esc(e.actor || "系统")}${e.location ? "　位置：" + TRACE.esc(e.location) : ""}${e.ref_id ? "　关联：#" + TRACE.esc(e.ref_id) : ""}</div>
+    </li>`).join("");
+}
+
+function renderReturn(d) {
+  const host = $("#return-area");
+  const p = d.pack;
+
+  // 历史退货申请
+  let hist = "";
+  if (d.return_requests && d.return_requests.length) {
+    hist = `<h3>退货申请记录</h3><table class="data">
+      <tr><th>#</th><th>原因</th><th>状态</th><th>发起人</th><th>复核</th><th>回执</th></tr>` +
+      d.return_requests.map(r => `<tr>
+        <td>${r.id}</td>
+        <td>${TRACE.esc(TRACE.REASON_TEXT[r.reason] || r.reason)}<div class="small muted">${TRACE.esc(r.detail || "")}</div></td>
+        <td>${TRACE.badge(TRACE.REQ_STATUS[r.status] || r.status, r.status === "rejected" ? "bad" : (r.status === "closed" ? "ok" : "info"))}</td>
+        <td class="small">${TRACE.esc(r.created_at)}</td>
+        <td class="small">${r.reviewed_at ? TRACE.esc(r.review_note || "已复核") : "—"}</td>
+        <td class="small">${r.carrier_txn ? TRACE.esc(r.carrier_txn) + " · " + (r.receipt_decision === "accepted" ? "受理出库" : "拒收退回") : "—"}</td>
+      </tr>`).join("") + `</table>`;
+  }
+
+  if (!p) { host.innerHTML = hist; return; }
+
+  const canRequest = ME.role === "clerk"
+    && ["IN_STOCK", "SOLD", "QUARANTINED"].includes(p.status)
+    && !(d.return_requests || []).some(r => ["pending", "outbound"].includes(r.status));
+
+  const roleNote = ME.role !== "clerk"
+    ? `<p class="small muted">退货申请由店员发起；店长账号请在「退货待审」页复核。</p>` : "";
+
+  if (!canRequest) {
+    let why = "";
+    if ((d.return_requests || []).some(r => ["pending", "outbound"].includes(r.status)))
+      why = "该条包已有处理中的退货申请。";
+    else if (["RETURNING", "RETURNED", "RECV_REJECTED"].includes(p.status))
+      why = `条包当前状态「${TRACE.STATUS_TEXT[p.status]}」，不能再发起退货。`;
+    host.innerHTML = hist + roleNote + (why ? `<p class="muted small">${TRACE.esc(why)}</p>` : "");
+    return;
+  }
+
+  host.innerHTML = hist + roleNote + `
+    <div class="flash-note">${p.status === "SOLD"
+      ? "该条包已售出：发起后将进入异常隔离核对入库链路，不能被直接改回在库。"
+      : "发起后条包进入退货核对隔离，等待店长复核。"}</div>
+    <label class="field"><span>退货原因</span>
+      <select id="rr-reason">
+        <option value="damaged">破损</option>
+        <option value="mismatch">串码不符（售退常见）</option>
+        <option value="other">其他</option>
+      </select>
+    </label>
+    <label class="field"><span>情况说明（可写 @accept / @reject 指定模拟配送方结论；串码以 X 结尾必被拒收）</span>
+      <textarea id="rr-detail" placeholder="如：顾客退回，外盒完好但条包批次不符"></textarea>
+    </label>
+    <label class="field"><span>现场照片（本地保存，可选，≤5MB）</span>
+      <input type="file" id="rr-photo" accept="image/*">
+    </label>
+    <button class="primary" id="rr-submit">店员发起退货申请</button>
+    <div id="rr-verdict"></div>`;
+
+  $("#rr-submit").addEventListener("click", async () => {
+    const file = $("#rr-photo").files[0];
+    let photo_data = null, photo_name = null;
+    if (file) {
+      photo_data = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result).split(",")[1]);
+        fr.onerror = rej;
+        fr.readAsDataURL(file);
+      });
+      photo_name = file.name;
+    }
+    try {
+      const r = await TRACE.api("POST", "/api/returns", {
+        serial: p.serial,
+        reason: $("#rr-reason").value,
+        detail: $("#rr-detail").value.trim(),
+        photo_data, photo_name,
+      });
+      TRACE.verdictHost($("#rr-verdict"), "ok", "退货申请已发起 #" + r.request_id,
+        "条包进入核对隔离，请等待店长在「退货待审」页复核。");
+      await doTrace();
+    } catch (e) {
+      TRACE.verdictHost($("#rr-verdict"), "bad", "退货申请被拦截", TRACE.esc(e.message));
+    }
+  });
+}
+</script>
+</body>
+</html>

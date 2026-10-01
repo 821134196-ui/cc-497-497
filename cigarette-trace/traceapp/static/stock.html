@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>库存差异 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <h1 class="page-title">库存差异</h1>
+  <p class="page-desc">在库条包按品牌规格分组，可展开到每一条条包；录入实物盘点数与系统在库数比对，差异留痕。</p>
+
+  <div id="role-note"></div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2>在库库存（按规格分组，点击展开条包）</h2>
+      <div id="inventory"></div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h2>实物盘点 · 差异登记</h2>
+        <label class="field"><span>品牌规格</span><select id="cnt-brand"></select></label>
+        <label class="field"><span>系统在库数</span><input type="text" id="cnt-system" disabled></label>
+        <label class="field"><span>实盘数量（条）</span><input type="number" id="cnt-physical" min="0" step="1"></label>
+        <label class="field"><span>备注</span><input type="text" id="cnt-note" placeholder="如：货架夹层找回 / 原因待查"></label>
+        <button class="primary" id="cnt-submit">提交盘点差异</button>
+        <div id="cnt-verdict"></div>
+      </div>
+
+      <div class="panel">
+        <h2>差异记录</h2>
+        <div id="snapshots"></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let ME = null, BRANDS = [], GROUPS = [];
+
+TRACE.initPage("/stock.html", async (me) => {
+  ME = me;
+  $("#role-note").innerHTML = me.role === "clerk"
+    ? `<div class="flash-note">当前为店员账号：可查看库存分组与差异；盘点差异登记需要店长权限。</div>`
+    : "";
+  if (me.role !== "clerk") { /* manager can count */ } else {
+    $("#cnt-submit").disabled = true;
+  }
+  $("#cnt-brand").addEventListener("change", fillSystemQty);
+  $("#cnt-submit").addEventListener("click", submitCount);
+  await loadAll();
+});
+
+async function loadAll() {
+  const [groups, diff] = await Promise.all([
+    TRACE.api("GET", "/api/inventory"),
+    TRACE.api("GET", "/api/stock-diff"),
+  ]);
+  GROUPS = groups;
+  BRANDS = diff.brands;
+  renderInventory(groups);
+  renderBrandSelect(diff);
+  renderSnapshots(diff);
+}
+
+function renderInventory(groups) {
+  const host = $("#inventory");
+  if (!groups.length) { host.innerHTML = `<div class="empty">当前没有在库条包。</div>`; return; }
+  host.innerHTML = groups.map((g, i) => `
+    <div class="group" data-i="${i}">
+      <button class="group-head" type="button">
+        <span class="caret">▶</span>
+        <span class="g-name">${TRACE.esc(g.brand_name)}</span>
+        <span class="g-spec">${TRACE.esc(g.brand_spec)}</span>
+        <span class="g-qty">${TRACE.badge("在库 " + g.qty + " 条", g.qty ? "ok" : "")}</span>
+      </button>
+      <div class="group-body">
+        <div class="small muted" style="margin:4px 0 6px">商品条码 <span class="serial-mono">${TRACE.esc(g.barcode)}</span></div>
+        <table class="data">
+          <tr><th>条包串码（完整）</th><th>批次</th><th>库位</th><th>状态</th><th></th></tr>
+          ${g.packs.map(p => `<tr>
+            <td class="serial-mono">${TRACE.esc(p.serial)}</td>
+            <td>${TRACE.esc(p.batch)}</td>
+            <td>${TRACE.esc(p.location)}</td>
+            <td>${TRACE.statusBadge(p.status)}</td>
+            <td><a href="/trace.html" data-serial="${TRACE.esc(p.serial)}" class="trace-link">追溯</a></td>
+          </tr>`).join("")}
+        </table>
+      </div>
+    </div>`).join("");
+  host.querySelectorAll(".group-head").forEach(h => h.addEventListener("click", () => {
+    h.parentElement.classList.toggle("open");
+  }));
+  host.querySelectorAll(".trace-link").forEach(a => a.addEventListener("click", () => {
+    sessionStorage.setItem("trace-serial", a.dataset.serial);
+  }));
+}
+
+function renderBrandSelect(diff) {
+  const sel = $("#cnt-brand");
+  sel.innerHTML = diff.brands.map(b =>
+    `<option value="${TRACE.esc(b.id)}">${TRACE.esc(b.name)} ${TRACE.esc(b.spec)}（系统在库 ${b.system_qty}）</option>`
+  ).join("");
+  fillSystemQty();
+}
+
+function fillSystemQty() {
+  const id = $("#cnt-brand").value;
+  const b = BRANDS.find(x => x.id === id);
+  $("#cnt-system").value = b ? b.system_qty : "";
+}
+
+async function submitCount() {
+  const brand_id = $("#cnt-brand").value;
+  const physical = $("#cnt-physical").value;
+  if (physical === "") { TRACE.toast("请填写实盘数量", "", "bad"); return; }
+  try {
+    const d = await TRACE.api("POST", "/api/stock-count", {
+      brand_id, physical_qty: Number(physical), note: $("#cnt-note").value.trim(),
+    });
+    const kind = d.diff === 0 ? "ok" : "bad";
+    TRACE.verdictHost($("#cnt-verdict"), kind,
+      `盘点已登记：系统 ${d.system_qty} / 实物 ${d.physical_qty} / 差异 ${d.diff > 0 ? "+" : ""}${d.diff}`,
+      d.diff === 0 ? "账实相符。" : (d.diff < 0 ? "实物少于系统，需排查是否漏登、破损未隔离或错放库位。"
+                                                  : "实物多于系统，需排查是否有未扫码入库条包。"));
+    $("#cnt-physical").value = "";
+    $("#cnt-note").value = "";
+    await loadAll();
+  } catch (e) {
+    TRACE.verdictHost($("#cnt-verdict"), "bad", "盘点登记失败", TRACE.esc(e.message));
+  }
+}
+
+function renderSnapshots(diff) {
+  const host = $("#snapshots");
+  if (!diff.snapshots.length) { host.innerHTML = `<div class="empty">还没有盘点差异记录。</div>`; return; }
+  host.innerHTML = `<table class="data">
+    <tr><th>时间</th><th>规格</th><th>系统</th><th>实物</th><th>差异</th><th>盘点人 / 备注</th></tr>
+    ${diff.snapshots.map(s => {
+      const cls = s.diff < 0 ? "diff-neg" : (s.diff > 0 ? "diff-pos" : "diff-zero");
+      const txt = s.diff === 0 ? "账实相符" : (s.diff < 0 ? `少 ${-s.diff} 条（盘亏）` : `多 ${s.diff} 条（盘盈）`);
+      return `<tr>
+        <td class="small">${TRACE.esc(s.created_at)}</td>
+        <td>${TRACE.esc(s.brand_name)}<div class="small muted">${TRACE.esc(s.brand_spec)}</div></td>
+        <td>${s.system_qty}</td>
+        <td>${s.physical_qty}</td>
+        <td class="${cls}">${s.diff > 0 ? "+" : ""}${s.diff}<div class="small">${txt}</div></td>
+        <td class="small">${TRACE.esc(s.counter)}<br><span class="muted">${TRACE.esc(s.note || "")}</span></td>
+      </tr>`;
+    }).join("")}
+  </table>`;
+}
+</script>
+</body>
+</html>

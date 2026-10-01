@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>收货扫描 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <h1 class="page-title">收货扫描</h1>
+  <p class="page-desc">门店按配送单接收卷烟条包：扫码记录品牌规格、条码、批次与库位。重复串码无法形成第二笔库存。</p>
+
+  <div id="serial-anchor" class="serial-anchor" style="display:none">
+    <div class="sa-label">当前扫描串码（完整）</div>
+    <div class="sa-serial" id="sa-serial"></div>
+    <div class="sa-loc">最近一次流转位置：<b id="sa-loc">—</b>
+      <span id="sa-status" style="margin-left:10px"></span>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <h2>扫码录入</h2>
+      <div class="row-inline" style="margin-bottom:10px">
+        <label class="field" style="flex:2">
+          <span>条包串码</span>
+          <input type="text" id="serial" placeholder="扫描或输入串码后回车" autocomplete="off">
+        </label>
+        <button id="preview-btn">查询核对</button>
+      </div>
+
+      <div id="preview-compare"></div>
+
+      <label class="field">
+        <span>实物条码</span>
+        <input type="text" id="barcode" placeholder="扫描商品条码，留空则按配送单">
+      </label>
+      <label class="field">
+        <span>实物批次</span>
+        <input type="text" id="batch" placeholder="扫描批次码，留空则按配送单">
+      </label>
+      <label class="field">
+        <span>上架库位</span>
+        <input type="text" id="location" placeholder="如 A-01-01，留空则按配送单库位">
+      </label>
+      <label class="field checkbox">
+        <input type="checkbox" id="damaged">
+        <span style="margin:0">收货即发现破损（隔离，不入库存）</span>
+      </label>
+      <div style="margin-top:12px; display:flex; gap:10px;">
+        <button class="primary" id="receive-btn">确认收货扫描</button>
+        <button id="reset-btn">清空</button>
+      </div>
+      <div id="verdict"></div>
+    </div>
+
+    <div class="panel">
+      <h2>本店待收串码（演示快速填充）</h2>
+      <p class="small muted">点击串码自动填入。已在库串码再次扫描会被重复拦截。</p>
+      <div id="pending-lines" class="pill-row"></div>
+      <h3>异常演练串码（已预置在系统中）</h3>
+      <div class="small muted" style="line-height:2">
+        <span class="serial-mono">HM260901DUP</span> 重复扫描目标<br>
+        <span class="serial-mono">QL260902001</span> 属 S002，在本店扫＝非本店入库<br>
+        <span class="serial-mono">HM260801001</span> 8 月批次，退货将超期拦截（在追溯页发起退货）<br>
+        输入任意不存在串码（如 <span class="serial-mono">UNK000</span>）＝来源不明拒收
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+
+TRACE.initPage("/receive.html", async (me) => {
+  if (me.role !== "clerk") {
+    $("#receive-btn").disabled = true;
+    $("#preview-compare").insertAdjacentHTML("beforebegin",
+      `<div class="flash-note">当前为店长账号：收货扫描由店员执行，您可在本页核对信息但不能提交。</div>`);
+  }
+
+  $("#serial").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); doPreview(); } });
+  $("#preview-btn").addEventListener("click", doPreview);
+  $("#receive-btn").addEventListener("click", doReceive);
+  $("#reset-btn").addEventListener("click", resetForm);
+
+  await loadPending();
+  $("#serial").focus();
+});
+
+async function loadPending() {
+  const lines = await TRACE.api("GET", "/api/delivery-lines");
+  const host = $("#pending-lines");
+  if (!lines.length) { host.innerHTML = `<span class="muted small">配送单串码均已扫描。</span>`; return; }
+  host.innerHTML = lines.map(l =>
+    `<span class="chip" title="${TRACE.esc(l.note_id)} / ${TRACE.esc(l.batch)} / ${TRACE.esc(l.location)}">${TRACE.esc(l.serial)}</span>`
+  ).join("");
+  host.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => {
+    $("#serial").value = c.textContent;
+    doPreview();
+  }));
+}
+
+async function doPreview() {
+  const serial = $("#serial").value.trim();
+  $("#verdict").innerHTML = "";
+  if (!serial) return;
+  $("#serial-anchor").style.display = "";
+  $("#sa-serial").textContent = serial;
+  try {
+    const d = await TRACE.api("GET", "/api/scan-preview?serial=" + encodeURIComponent(serial));
+    const loc = d.pack ? d.pack.location : (d.line ? d.line.location : "—");
+    $("#sa-loc").textContent = loc + (d.last_event ? `（${TRACE.EVENT_TEXT[d.last_event.event_type] || d.last_event.event_type}）` : "");
+    $("#sa-status").innerHTML = d.pack ? TRACE.statusBadge(d.pack.status) + " " + TRACE.anomalyBadge(d.pack.anomaly)
+                                       : TRACE.badge("系统内无主档", "warn");
+    if (d.line && !d.belongs_here) {
+      $("#sa-status").insertAdjacentHTML("beforeend", " " + TRACE.badge("非本店配送单", "bad"));
+    }
+    renderCompare(d);
+  } catch (e) {
+    TRACE.verdictHost($("#verdict"), "bad", "查询失败", TRACE.esc(e.message));
+  }
+}
+
+function renderCompare(d) {
+  const host = $("#preview-compare");
+  if (!d.pack && !d.line) {
+    host.innerHTML = `<div class="verdict bad"><div class="v-title">来源不明：任何配送单均无此串码</div>
+      <div class="v-body">确认收货将被拒收，系统只记录拦截事件，不生成库存。</div></div>`;
+    return;
+  }
+  if (d.pack) {
+    host.innerHTML = `<div class="verdict warn"><div class="v-title">该串码已扫描登记（重复扫描风险）</div>
+      <div class="v-body">当前状态：${TRACE.STATUS_TEXT[d.pack.status] || d.pack.status}；
+      再次确认收货将被拦截，不能形成第二笔库存。</div></div>`;
+    return;
+  }
+  // 待收：展示配送单链路信息，供与实物核对
+  const l = d.line;
+  const belong = d.belongs_here;
+  host.innerHTML = `<div class="verdict ${belong ? "ok" : "bad"}">
+      <div class="v-title">${belong ? "匹配本店配送单 " + TRACE.esc(l.note_id) : "非本店入库：该串码属于其他门店配送单 " + TRACE.esc(l.note_id)}</div>
+      <div class="v-body">品牌规格：${TRACE.esc(l.brand_name)} ${TRACE.esc(l.brand_spec)}；
+      单据条码 <span class="serial-mono">${TRACE.esc(l.barcode)}</span>；批次 ${TRACE.esc(l.batch)}；库位 ${TRACE.esc(l.location)}</div>
+    </div>`;
+  if (!$("#barcode").value) $("#barcode").value = l.barcode;
+  if (!$("#batch").value) $("#batch").value = l.batch;
+  if (!$("#location").value) $("#location").value = l.location;
+}
+
+async function doReceive() {
+  const serial = $("#serial").value.trim();
+  if (!serial) { TRACE.toast("请先扫描串码", "", "bad"); return; }
+  try {
+    const d = await TRACE.api("POST", "/api/receive", {
+      serial,
+      barcode: $("#barcode").value.trim(),
+      batch: $("#batch").value.trim(),
+      location: $("#location").value.trim(),
+      damaged: $("#damaged").checked,
+    });
+    if (d.result === "received") {
+      TRACE.verdictHost($("#verdict"), "ok", "结论：正常收货入库",
+        `已生成一笔库存，串码 <span class="serial-mono">${TRACE.esc(serial)}</span>，库位 ${TRACE.esc(d.pack.location)}。`);
+    } else if (d.result === "quarantined") {
+      TRACE.verdictHost($("#verdict"), "bad", "结论：异常隔离 · " + d.text,
+        `该条包未计入在库，已进入<a href="/quarantine.html">异常隔离页</a>待店长处：串码 <span class="serial-mono">${TRACE.esc(serial)}</span>`);
+    }
+    await doPreview();
+    await loadPending();
+  } catch (e) {
+    // 重复扫描 / 来源不明 / 权限等：全部为文字结论
+    TRACE.verdictHost($("#verdict"), "bad", "结论：收货被拦截", TRACE.esc(e.message));
+    await doPreview();
+    await loadPending();
+  }
+}
+
+function resetForm() {
+  ["serial", "barcode", "batch", "location"].forEach(id => $("#" + id).value = "");
+  $("#damaged").checked = false;
+  $("#preview-compare").innerHTML = "";
+  $("#verdict").innerHTML = "";
+  $("#serial-anchor").style.display = "none";
+  $("#serial").focus();
+}
+</script>
+</body>
+</html>

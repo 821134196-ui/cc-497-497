@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>退货待审 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <h1 class="page-title">退货待审</h1>
+  <p class="page-desc">店员发起、店长复核；复核通过后向模拟配送方索取回执，回执决定最终出库。重复索取回执为重放，返回首次结论、不重复出库。</p>
+
+  <div id="role-note"></div>
+
+  <div class="panel">
+    <h2>待店长复核</h2>
+    <div id="pending"></div>
+  </div>
+
+  <div class="panel">
+    <h2>已复核 · 待配送方回执</h2>
+    <div id="outbound"></div>
+  </div>
+
+  <div class="panel">
+    <h2>近期结案 / 驳回</h2>
+    <div id="finished"></div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let ME = null;
+
+TRACE.initPage("/returns.html", async (me) => {
+  ME = me;
+  $("#role-note").innerHTML = me.role === "clerk"
+    ? `<div class="flash-note">当前为店员账号：本页仅可查看退货进度。复核、索取配送方回执需要店长权限。</div>`
+    : `<div class="flash-note">当前为店长账号：请核对入库链路后复核；可反复点击「索取/重放回执」验证幂等。</div>`;
+  await loadAll();
+});
+
+async function loadAll() {
+  await Promise.all([loadPending(), loadOutbound(), loadFinished()]);
+}
+
+async function loadPending() {
+  const rows = await TRACE.api("GET", "/api/pending-returns");
+  const host = $("#pending");
+  if (!rows.length) { host.innerHTML = `<div class="empty">暂无待复核申请。</div>`; return; }
+  host.innerHTML = `<table class="data">
+    <tr><th>#</th><th>串码 / 规格</th><th>原因与说明</th><th>发起人</th><th>入库链路</th><th>照片</th><th>操作</th></tr>
+    ${rows.map(r => `<tr>
+      <td>${r.id}</td>
+      <td><div class="serial-mono">${TRACE.esc(r.serial)}</div>
+          <div class="small muted">${TRACE.esc(r.pack ? r.pack.status_text : "")} · ${TRACE.esc(r.pack && r.pack.location)}</div></td>
+      <td>${TRACE.esc(TRACE.REASON_TEXT[r.reason] || r.reason)}<div class="small muted">${TRACE.esc(r.detail || "")}</div></td>
+      <td class="small">${TRACE.esc(r.creator_name)}<br>${TRACE.esc(r.created_at)}</td>
+      <td class="small">${chainText(r)}</td>
+      <td>${r.photo_path ? `<a href="/photos/${TRACE.esc(basename(r.photo_path))}" target="_blank">查看照片</a>` : "—"}</td>
+      <td>${ME.role === "manager" ? `
+        <div class="row-inline" style="gap:6px">
+          <button class="safe" data-act="approved" data-id="${r.id}">复核通过</button>
+          <button class="danger" data-act="rejected" data-id="${r.id}">驳回</button>
+        </div>
+        <input type="text" class="review-note" data-id="${r.id}" placeholder="复核备注（可选）" style="margin-top:6px">`
+        : TRACE.badge("待店长处理", "warn")}</td>
+    </tr>`).join("")}
+  </table>`;
+  host.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("click", async () => {
+    const id = b.dataset.id, act = b.dataset.act;
+    const note = host.querySelector(`.review-note[data-id="${id}"]`).value;
+    if (act === "rejected" && !confirm("确认驳回该退货申请？")) return;
+    try {
+      await TRACE.api("POST", `/api/returns/${id}/review`, { decision: act, note });
+      TRACE.toast(act === "approved" ? "已复核通过，等待配送方回执" : "已驳回", "", "ok");
+      await loadAll();
+    } catch (e) { TRACE.toast("复核失败", e.message, "bad"); }
+  }));
+}
+
+function chainText(r) {
+  // pending 列表未直接带 line；用追溯接口太重，这里展示 pack 批次库位即可
+  if (!r.pack) return "—";
+  return `批次 ${TRACE.esc(r.pack.batch || "—")}<br>库位 ${TRACE.esc(r.pack.location || "—")}`;
+}
+
+function basename(p) { return p.split(/[\\/]/).pop(); }
+
+async function loadOutbound() {
+  // outbound 不在 pending 接口；借追溯逐条太重，改为返回全部申请的独立接口不可用时，
+  // 用 quarantine + 已知数据不足，故服务端在 pending 之外另提供：直接请求 trace 不现实。
+  // 这里由 /api/returns-outbound 提供（见服务端路由）。
+  let rows = [];
+  try { rows = await TRACE.api("GET", "/api/returns-outbound"); } catch (e) { rows = []; }
+  const host = $("#outbound");
+  if (!rows.length) { host.innerHTML = `<div class="empty">暂无等待回执的退货。</div>`; return; }
+  host.innerHTML = `<table class="data">
+    <tr><th>#</th><th>串码</th><th>当前状态</th><th>复核</th><th>操作</th></tr>
+    ${rows.map(r => `<tr>
+      <td>${r.id}</td>
+      <td class="serial-mono">${TRACE.esc(r.serial)}</td>
+      <td>${TRACE.badge(r.pack ? r.pack.status_text : r.status, "info")}
+          ${r.pack && r.pack.anomaly ? " " + TRACE.anomalyBadge(r.pack.anomaly) : ""}</td>
+      <td class="small">${TRACE.esc(r.review_note || "—")}</td>
+      <td>${ME.role === "manager"
+        ? `<button class="primary" data-id="${r.id}">索取 / 重放配送方回执</button>
+           <div class="small muted" id="receipt-${r.id}"></div>`
+        : TRACE.badge("需店长操作", "warn")}</td>
+    </tr>`).join("")}
+  </table>`;
+  host.querySelectorAll("button[data-id]").forEach(b => b.addEventListener("click", async () => {
+    const id = b.dataset.id;
+    try {
+      const d = await TRACE.api("POST", `/api/returns/${id}/carrier`, {});
+      const box = host.querySelector(`#receipt-${id}`);
+      if (d.result === "replay") {
+        box.innerHTML = `重放结果：结论与首次一致（${d.decision === "accepted" ? "受理出库" : "拒收退回"}，流水号 ${TRACE.esc(d.txn_id)}），库存状态未再变化。`;
+        TRACE.toast("回执重放（幂等）", "返回首次结论，未产生第二次出库。", "ok");
+      } else {
+        box.innerHTML = `首次回执：${d.decision === "accepted" ? "受理，最终出库完成" : "拒收，条包退回门店"}（流水号 ${TRACE.esc(d.txn_id)}）`;
+        TRACE.toast("收到配送方回执", d.decision === "accepted" ? "受理出库" : "拒收退回", "ok");
+      }
+      await loadAll();
+    } catch (e) { TRACE.toast("索取回执失败", e.message, "bad"); }
+  }));
+}
+
+async function loadFinished() {
+  let rows = [];
+  try { rows = await TRACE.api("GET", "/api/returns-finished"); } catch (e) { rows = []; }
+  const host = $("#finished");
+  if (!rows.length) { host.innerHTML = `<div class="empty">暂无记录。</div>`; return; }
+  host.innerHTML = `<table class="data">
+    <tr><th>#</th><th>串码</th><th>状态</th><th>复核人</th><th>回执流水 / 结论</th><th>时间</th></tr>
+    ${rows.map(r => `<tr>
+      <td>${r.id}</td>
+      <td class="serial-mono">${TRACE.esc(r.serial)}</td>
+      <td>${TRACE.badge(TRACE.REQ_STATUS[r.status] || r.status,
+          r.status === "closed" ? (r.receipt_decision === "accepted" ? "ok" : "warn") : "bad")}</td>
+      <td class="small">${TRACE.esc(r.review_note || "—")}</td>
+      <td class="small">${r.carrier_txn
+          ? TRACE.esc(r.carrier_txn) + " · " + (r.receipt_decision === "accepted" ? "受理出库" : "拒收退回")
+          : "—"}</td>
+      <td class="small">${TRACE.esc(r.receipt_at || r.reviewed_at || "")}</td>
+    </tr>`).join("")}
+  </table>`;
+}
+</script>
+</body>
+</html>

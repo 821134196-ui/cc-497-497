@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>异常隔离 · 卷烟条包追溯</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <h1 class="page-title">异常隔离</h1>
+  <p class="page-desc">破损、串码不符、非本店入库等异常条包单独隔离、不计在库；单据记录与实物信息左右并排对比，结论以文字写明。</p>
+
+  <div id="role-note"></div>
+
+  <div class="panel">
+    <h2>隔离中的条包（<span id="q-count">0</span>）</h2>
+    <div id="list"></div>
+  </div>
+
+  <div class="panel">
+    <h2>拦截记录（未形成库存 / 未放行成功）</h2>
+    <div id="blocked"></div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let ME = null;
+
+TRACE.initPage("/quarantine.html", async (me) => {
+  ME = me;
+  $("#role-note").innerHTML = me.role === "clerk"
+    ? `<div class="flash-note">当前为店员账号：可查看隔离与对比信息；解除隔离、拒收处置需要店长权限。</div>`
+    : `<div class="flash-note">当前为店长账号：核对左右信息后选择处置。已售出过的条包不能解除隔离回在库；非本店入库不能转本店库存。</div>`;
+  await loadAll();
+});
+
+async function loadAll() {
+  await Promise.all([loadQuarantine(), loadBlocked()]);
+}
+
+async function loadQuarantine() {
+  const rows = await TRACE.api("GET", "/api/quarantine");
+  $("#q-count").textContent = rows.length;
+  const host = $("#list");
+  if (!rows.length) { host.innerHTML = `<div class="empty">没有隔离中的条包。</div>`; return; }
+
+  host.innerHTML = rows.map((p, i) => {
+    const l = p.line;
+    const bcHit = l && p.barcode && p.barcode !== l.line_barcode;
+    const btHit = l && p.batch && p.batch !== l.batch;
+    const storeHit = l && p.store_id !== l.note_store_id;
+    const reason = TRACE.ANOMALY_TEXT[p.anomaly] || p.anomaly || "待核查";
+    const reasonKind = ["damaged","code_mismatch","foreign_store"].includes(p.anomaly) ? "bad" : "warn";
+    return `
+    <div class="panel" style="background:var(--panel-2)">
+      <div class="row-inline" style="align-items:center">
+        <div style="flex:2">
+          <div class="serial-mono" style="font-size:16px; font-weight:700">${TRACE.esc(p.serial)}</div>
+          <div class="small muted">${TRACE.esc(p.brand_name || "未知品牌")} ${TRACE.esc(p.brand_spec || "")} · 隔离位置 ${TRACE.esc(p.location || "—")}</div>
+        </div>
+        ${TRACE.badge("隔离原因：" + reason, reasonKind)}
+        ${TRACE.statusBadge(p.status)}
+      </div>
+      <div class="compare" style="margin-top:10px">
+        <div>
+          <h4>配送单原始记录（应有）</h4>
+          ${l ? `<dl class="kv">
+            <dt>配送单</dt><dd class="serial-mono">${TRACE.esc(l.note_id)}</dd>
+            <dt>门店</dt><dd class="${storeHit ? "diff-hit" : ""}">${TRACE.esc(l.note_store_id)}（配送方 ${TRACE.esc(l.carrier)}）</dd>
+            <dt>品牌</dt><dd>${TRACE.esc(l.brand_name)} ${TRACE.esc(l.brand_spec)}</dd>
+            <dt>条码</dt><dd class="serial-mono ${bcHit ? "diff-hit" : ""}">${TRACE.esc(l.line_barcode)}</dd>
+            <dt>批次</dt><dd class="${btHit ? "diff-hit" : ""}">${TRACE.esc(l.batch)}</dd>
+            <dt>计划库位</dt><dd>${TRACE.esc(l.location)}</dd>
+            <dt>签收时间</dt><dd>${TRACE.esc(l.delivered_at)}</dd>
+          </dl>` : `<p class="muted">无配送单链路记录</p>`}
+        </div>
+        <div>
+          <h4>实物扫码 / 当前主档（实有）</h4>
+          <dl class="kv">
+            <dt>主档门店</dt><dd class="${storeHit ? "diff-hit" : ""}">${TRACE.esc(p.store_id)}${storeHit ? " ← 与配送单门店不符" : ""}</dd>
+            <dt>实物条码</dt><dd class="serial-mono ${bcHit ? "diff-hit" : ""}">${TRACE.esc(p.barcode || "—")}${bcHit ? " ← 不一致" : ""}</dd>
+            <dt>实物批次</dt><dd class="${btHit ? "diff-hit" : ""}">${TRACE.esc(p.batch || "—")}${btHit ? " ← 不一致" : ""}</dd>
+            <dt>当前库位</dt><dd>${TRACE.esc(p.location || "—")}</dd>
+            <dt>收货时间</dt><dd>${TRACE.esc(p.received_at || "—")}</dd>
+          </dl>
+          <div class="verdict ${(bcHit || btHit || storeHit) ? "bad" : "warn"}">
+            <div class="v-title">处置结论建议：${conclusion(p, {bcHit, btHit, storeHit})}</div>
+            <div class="v-body">${conclusionBody(p, {bcHit, btHit, storeHit})}</div>
+          </div>
+          ${ME.role === "manager" ? `
+            <div class="row-inline" style="gap:8px; margin-top:8px">
+              <button class="safe" data-serial="${TRACE.esc(p.serial)}" data-act="to_stock"
+                ${p.anomaly === "foreign_store" ? "disabled title='非本店入库不能转本店库存'" : ""}>核查无误·回在库</button>
+              <button class="danger" data-serial="${TRACE.esc(p.serial)}" data-act="refuse">拒收 / 退回处理</button>
+            </div>
+            <div class="small muted" id="d-${i}"></div>`
+            : `<div class="small muted">处置操作需店长账号。</div>`}
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  host.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("click", async () => {
+    const serial = b.dataset.serial, act = b.dataset.act;
+    if (act === "refuse" && !confirm("确认拒收该条包？拒收后不计入本店库存。")) return;
+    try {
+      const d = await TRACE.api("POST", "/api/anomaly/dispose", { serial, action: act, note: "" });
+      TRACE.toast(act === "to_stock" ? "已解除隔离，条包回到在库" : "已作拒收处理", "", "ok");
+      await loadAll();
+    } catch (e) {
+      TRACE.toast("处置被拦截", e.message, "bad");
+    }
+  }));
+}
+
+function conclusion(p, hits) {
+  if (p.anomaly === "foreign_store" || hits.storeHit) return "非本店入库，禁止转本店库存，应拒收/转运回所属门店";
+  if (p.anomaly === "code_mismatch" || hits.bcHit || hits.btHit) return "串码不符，需向配送方核对后再决定，不得直接在库销售";
+  if (p.anomaly === "damaged") return "破损条包，不得在库销售，按破损流程申请退货或报损";
+  if (p.anomaly === "return_verify") return "退货核对中，等待店长在退货待审页复核";
+  return "异常待人工核查";
+}
+function conclusionBody(p, hits) {
+  const diffs = [];
+  if (hits.bcHit) diffs.push("实物条码与单据不一致");
+  if (hits.btHit) diffs.push("实物批次与单据不一致");
+  if (hits.storeHit) diffs.push("门店归属不一致");
+  return diffs.length ? "差异项：" + diffs.join("；") + "。"
+                      : "实物与单据字段一致，异常来自收货/退货环节登记，请按流程处置。";
+}
+
+async function loadBlocked() {
+  const rows = await TRACE.api("GET", "/api/blocked-events");
+  const host = $("#blocked");
+  if (!rows.length) { host.innerHTML = `<div class="empty">暂无拦截记录（重复扫描、超期退货等操作后在此显示）。</div>`; return; }
+  host.innerHTML = `<table class="data">
+    <tr><th>时间</th><th>串码</th><th>拦截类型</th><th>说明</th><th>操作人</th></tr>
+    ${rows.map(e => `<tr>
+      <td class="small">${TRACE.esc(e.created_at)}</td>
+      <td class="serial-mono">${TRACE.esc(e.serial)}</td>
+      <td>${TRACE.badge(TRACE.EVENT_TEXT[e.event_type] || e.event_type, "bad")}</td>
+      <td>${TRACE.esc(e.detail || "")}</td>
+      <td class="small">${TRACE.esc(e.actor || "")}</td>
+    </tr>`).join("")}
+  </table>`;
+}
+</script>
+</body>
+</html>
