@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>门店卷烟条包流转追溯系统（演示）</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="login" class="login-wrap">
+  <div class="panel">
+    <h1>门店卷烟条包流转追溯</h1>
+    <p class="muted small" style="margin:2px 0 16px;">按配送单收货 · 全链路追溯 · 退货复核 · 异常隔离</p>
+    <div class="field"><label>用户名</label><input id="lg-user" type="text" value="clerk" autocomplete="username"></div>
+    <div class="field"><label>密码</label><input id="lg-pass" type="password" value="clerk123" autocomplete="current-password"></div>
+    <button class="btn" id="lg-btn">登录</button>
+    <div class="hint">
+      演示账号（均为虚构数据）：<br>
+      店员 <b>clerk / clerk123</b>（收货扫描、发起退货）<br>
+      店长 <b>manager / mgr123</b>（退货复核、配送回执）<br>
+      二店店员 <b>clerk2 / clerk123</b>（验证“非本店”隔离）
+    </div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" style="display:none;">
+  <header class="topbar">
+    <h1>卷烟条包流转追溯</h1>
+    <nav class="tabs" id="tabs">
+      <button data-page="receive" class="active">收货扫描</button>
+      <button data-page="trace">条包追溯</button>
+      <button data-page="returns">退货待审</button>
+      <button data-page="quarantine">异常隔离</button>
+      <button data-page="diff">库存差异</button>
+    </nav>
+    <span class="who"><b id="who-name"></b>（<span id="who-role"></span>）· <span id="who-store"></span>
+      <button class="btn small secondary" id="logout-btn" style="margin-left:10px;">退出</button></span>
+  </header>
+
+  <main>
+    <!-- 固定串码栏（收货扫描页始终显示完整串码与最近位置） -->
+    <div class="codebar" id="receive-codebar">
+      <div class="code mono" id="cb-code">—</div>
+      <div class="meta">
+        <span>当前状态：<b id="cb-state">—</b></span>
+        <span>最近一次流转位置：<b id="cb-location">—</b></span>
+        <span>最近流转：<b id="cb-last">—</b></span>
+      </div>
+    </div>
+
+    <!-- ============ 收货扫描 ============ -->
+    <section class="page active" id="page-receive">
+      <div class="panel">
+        <h2>按配送单扫码收货</h2>
+        <div class="row">
+          <div class="field"><label>配送单</label><select id="rc-note"></select></div>
+          <div class="field"><label>条包完整串码</label><input id="rc-code" type="text"
+             placeholder="如 YHY260001" style="min-width:220px;"></div>
+          <div class="field"><label>品牌条码（选填，核对用）</label><input id="rc-barcode" type="text" placeholder="6901234000011"></div>
+          <div class="field"><label>入库库位</label><input id="rc-location" type="text" value="A区货架-01"></div>
+          <div class="field"><label>&nbsp;</label><span style="padding:7px 0; white-space:nowrap;">
+            <input type="checkbox" id="rc-damaged"> <label for="rc-damaged" style="display:inline;">外包装破损</label></span></div>
+          <button class="btn" id="rc-submit">扫码入库</button>
+        </div>
+        <p class="muted small" style="margin:8px 0 0;">
+          演示：正常码 YHY260003｜再扫一次 YHY260003 看重复拦截｜破损 YHY260005（勾选破损）｜
+          串码不符 YHY260099｜非本店 YHY260010
+        </p>
+
+        <div class="banner ok" id="rc-ok"><span class="tag">结论：正常</span><span id="rc-ok-msg"></span></div>
+        <div class="banner err" id="rc-err"><span class="tag" id="rc-err-tag">结论：异常</span><span id="rc-err-msg"></span>
+          <div class="compare" id="rc-compare" style="display:none;">
+            <div class="col"><h4>系统预期（配送单 / 计划）</h4><dl id="rc-cmp-expected"></dl></div>
+            <div class="col actual"><h4>实际扫描结果</h4><dl id="rc-cmp-actual"></dl></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>最近扫码记录（含被拒绝的扫描尝试）</h2>
+        <table><thead><tr><th>时间</th><th>串码</th><th>场景</th><th>结论</th><th>原因</th></tr></thead>
+          <tbody id="recent-body"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ============ 条包追溯 ============ -->
+    <section class="page" id="page-trace">
+      <div class="panel">
+        <h2>条包全链路追溯</h2>
+        <div class="row">
+          <div class="field"><label>完整串码</label><input id="tr-code" type="text" placeholder="如 YHY260004"></div>
+          <button class="btn" id="tr-btn">查询</button>
+          <span class="muted small">销售退回的条包会核对原始入库链路，无正常收货流水则退货被拦截。</span>
+        </div>
+        <div class="banner err" id="tr-err" style="margin-top:12px;"><span class="tag">查询失败</span><span id="tr-err-msg"></span></div>
+      </div>
+      <div id="tr-result" style="display:none;">
+        <div class="panel">
+          <h2>条包信息</h2>
+          <div class="grid2">
+            <dl class="kv" id="tr-kv1"></dl>
+            <dl class="kv" id="tr-kv2"></dl>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>流转时间线（SQLite flows，每次流转一条）</h2>
+          <ul class="timeline" id="tr-flows"></ul>
+        </div>
+        <div class="panel" id="tr-returns-panel" style="display:none;">
+          <h2>退货与配送回执</h2>
+          <table><thead><tr><th>#</th><th>状态</th><th>申请人</th><th>持有天数</th><th>理由/复核</th><th>配送回执</th></tr></thead>
+          <tbody id="tr-returns"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 退货待审 ============ -->
+    <section class="page" id="page-returns">
+      <div class="panel" id="ret-request-panel">
+        <h2>店员发起退货申请</h2>
+        <div class="row">
+          <div class="field"><label>已售条包串码</label><input id="ret-code" type="text" placeholder="仅限状态「已售」的条包"></div>
+          <div class="field"><label>退货原因</label><input id="ret-reason" type="text" placeholder="如：顾客购错规格"></div>
+          <div class="field"><label>照片（本地保存）</label><input id="ret-photo" type="file" accept="image/*"></div>
+          <button class="btn" id="ret-btn">提交退货申请</button>
+        </div>
+        <p class="muted small" style="margin:8px 0 0;">已售条包不能被直接改回在库：申请后进入「退货待审」，由店长复核；超 7 天期限系统直接拒绝。</p>
+        <div class="banner ok" id="ret-ok" style="margin-top:12px;"></div>
+        <div class="banner err" id="ret-err" style="margin-top:12px;"></div>
+      </div>
+      <div class="panel">
+        <h2>退货单队列</h2>
+        <table><thead><tr><th>#</th><th>串码/规格</th><th>状态</th><th>申请人</th><th>持有天数</th>
+          <th>原因 / 复核意见</th><th id="ret-action-th">操作（店长）</th></tr></thead>
+          <tbody id="ret-body"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ============ 异常隔离 ============ -->
+    <section class="page" id="page-quarantine">
+      <div class="panel">
+        <h2>异常隔离区</h2>
+        <p class="muted small" style="margin-top:0;">破损、串码不符、非本店入库、配送方拒收分别归类；异常条包不计入在库，照片保存在本地。</p>
+        <table><thead><tr><th>串码</th><th>规格</th><th>批次</th><th>异常类型（文字结论）</th>
+          <th>对比说明（预期 / 实际）</th><th>库位</th><th>照片</th></tr></thead>
+          <tbody id="q-body"></tbody></table>
+      </div>
+    </section>
+
+    <!-- ============ 库存差异 ============ -->
+    <section class="page" id="page-diff">
+      <div class="panel">
+        <h2>库存（按规格分组，点击展开到条包）</h2>
+        <table id="inv-table"><thead><tr><th style="width:26px;"></th><th>品牌规格</th>
+          <th>在库</th><th>已售/退货中</th><th>已出库</th><th>异常隔离</th><th>合计</th></tr></thead>
+          <tbody id="inv-body"></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>配送单库存差异（应到 / 实到 / 状态）</h2>
+        <div id="diff-notes"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
